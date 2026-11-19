@@ -1,5 +1,6 @@
 package com.albinvpn.app.data
 
+import android.graphics.Bitmap
 import kotlinx.serialization.Serializable
 import java.util.UUID
 
@@ -13,8 +14,8 @@ enum class AppLanguage(val code: String, val nativeLabel: String) {
 
 @Serializable
 enum class VpnMode {
-    TUN,        // Strict full-device VPN: all traffic forced into VPN
-    PROXY_APPS  // Per-app routing: selected apps only or exclude selected apps
+    TUN,
+    PROXY_APPS
 }
 
 @Serializable
@@ -34,13 +35,14 @@ enum class ThemeMode {
 }
 
 @Serializable
-enum class AccentShade(val seedHex: Long) {
-    PURPLE(0xFF7C4DFF),
-    OCEAN_BLUE(0xFF1A73E8),
-    EMERALD(0xFF00897B),
-    ROSE(0xFFD81B60),
-    AMBER(0xFFEF6C00),
-    SYSTEM_DYNAMIC(0xFF7C4DFF)
+enum class AccentShade(val seedHex: Long, val labelRu: String, val labelEn: String) {
+    PURPLE(0xFF8B5CF6, "Фиолетовый (База)", "Pixel Purple (Default)"),
+    ULTRAVIOLET(0xFFA855F7, "Ультрафиолет", "Ultraviolet Neon"),
+    OCEAN_BLUE(0xFF1A73E8, "Синий Google", "Google Blue"),
+    EMERALD(0xFF00BFA5, "Кибер-изумруд", "Cyber Emerald"),
+    ROSE(0xFFEC4899, "Неон-розовый", "Neon Rose"),
+    AMBER(0xFFF59E0B, "Янтарный", "Solar Amber"),
+    SYSTEM_DYNAMIC(0xFF8B5CF6, "Обои (Material You)", "Wallpaper (Material You)")
 }
 
 @Serializable
@@ -73,14 +75,14 @@ data class AppSettings(
     val language: AppLanguage = AppLanguage.RU,
     val themeMode: ThemeMode = ThemeMode.DARK,
     val accentShade: AccentShade = AccentShade.PURPLE,
+    val auroraEnabled: Boolean = true,
     val coreEngine: CoreEngineType = CoreEngineType.AUTO,
     val vpnMode: VpnMode = VpnMode.TUN,
     val perAppPolicy: PerAppPolicy = PerAppPolicy.ONLY_SELECTED,
     val selectedPackages: Set<String> = emptySet(),
-    val tunMtu: Int = 1500,
+    val tunMtu: Int = 1400,
     val ipv6Enabled: Boolean = false,
     val sniffingEnabled: Boolean = true,
-    val fakeDnsEnabled: Boolean = false,
     val remoteDns: String = "1.1.1.1",
     val fragmentEnabled: Boolean = false,
     val fragmentLength: String = "10-30",
@@ -94,16 +96,22 @@ enum class ConnectionState {
 }
 
 data class TrafficStats(
-    val rxMbps: Float = 0f,
-    val txMbps: Float = 0f,
-    val rxHistory: List<Float> = List(22) { 0f },
-    val txHistory: List<Float> = List(22) { 0f },
+    val rxBytesPerSec: Long = 0L,
+    val txBytesPerSec: Long = 0L,
+    val totalRxBytes: Long = 0L,
+    val totalTxBytes: Long = 0L,
+    val rxHistory: List<Float> = List(26) { 0f },
+    val txHistory: List<Float> = List(26) { 0f },
+    val livePingMs: Int? = null,
     val connectedSeconds: Long = 0L,
     val activeServerName: String = "",
+    val exitIpInfo: String? = null,
     val errorMessage: String? = null
 )
 
 data class InstalledAppInfo(
     val packageName: String,
-    val label: String
+    val label: String,
+    val isSystem: Boolean,
+    val icon: Bitmap?
 )

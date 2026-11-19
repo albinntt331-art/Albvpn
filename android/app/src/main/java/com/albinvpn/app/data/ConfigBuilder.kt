@@ -5,30 +5,17 @@ import org.json.JSONObject
 
 object ConfigBuilder {
 
-    fun selectCore(profile: VpnProfile, preferred: CoreEngineType): CoreEngineType {
-        if (preferred != CoreEngineType.AUTO) return preferred
-        return when (profile.protocol.lowercase()) {
-            "hysteria2", "wireguard", "tuic" -> CoreEngineType.SING_BOX
-            else -> CoreEngineType.XRAY
-        }
-    }
-
-    /**
-     * Builds a complete Xray-core v26+ JSON config with NATIVE TUN INBOUND ("protocol": "tun"),
-     * which reads directly from the tunFd passed to AndroidLibXrayLite StartLoop(config, tunFd).
-     * Strictly routes all traffic through the selected proxy outbound without requiring external tun2socks.
-     */
     fun buildXrayConfig(profile: VpnProfile, settings: AppSettings): String {
         val root = JSONObject()
         root.put("log", JSONObject().put("loglevel", "warning"))
 
-        // Clean DNS routed through proxy (no geosite dependency crash!)
-        val dnsServers = JSONArray().apply {
-            put(settings.remoteDns.ifBlank { "1.1.1.1" })
-            put("8.8.8.8")
-        }
+        // Reliable DoH + IP DNS through Xray internal resolver (prevents DNS stalls on LTE/Wi-Fi)
         root.put("dns", JSONObject().apply {
-            put("servers", dnsServers)
+            put("servers", JSONArray().apply {
+                put("https+local://1.1.1.1/dns-query")
+                put("1.1.1.1")
+                put("8.8.8.8")
+            })
             put("queryStrategy", if (settings.ipv6Enabled) "UseIP" else "UseIPv4")
         })
 
@@ -38,7 +25,6 @@ object ConfigBuilder {
             put("routeOnly", false)
         }
 
-        // CRITICAL FIX: Native Xray TUN inbound consumes Android VpnService tunFd!
         val inbounds = JSONArray().apply {
             put(JSONObject().apply {
                 put("tag", "tun-in")
@@ -46,7 +32,7 @@ object ConfigBuilder {
                 put("protocol", "tun")
                 put("settings", JSONObject().apply {
                     put("name", "xray0")
-                    put("MTU", settings.tunMtu)
+                    put("MTU", settings.tunMtu.coerceIn(1280, 1500))
                 })
                 put("sniffing", sniffing)
             })
@@ -63,7 +49,10 @@ object ConfigBuilder {
 
         val outbounds = JSONArray().apply {
             put(buildXrayOutbound(profile, settings))
-            put(JSONObject().put("tag", "direct").put("protocol", "freedom"))
+            put(JSONObject().put("tag", "direct").put("protocol", "freedom").apply {
+                put("settings", JSONObject().put("domainStrategy", "UseIPv4"))
+            })
+            put(JSONObject().put("tag", "dns-out").put("protocol", "dns"))
             put(JSONObject().put("tag", "block").put("protocol", "blackhole"))
             if (settings.fragmentEnabled) {
                 put(JSONObject().apply {
@@ -79,11 +68,24 @@ object ConfigBuilder {
         }
         root.put("outbounds", outbounds)
 
-        // Strict routing: all traffic from tun-in goes to proxy outbound
+        // 1) Hijack DNS port 53 to dns-out (resolves reliably over VPN)
+        // 2) Keep private LAN direct so local Wi-Fi doesn't break
+        // 3) Strictly force ALL other TCP/UDP traffic into proxy outbound
         val rules = JSONArray().apply {
             put(JSONObject().apply {
                 put("type", "field")
-                put("inboundTag", JSONArray().put("tun-in").put("socks-in"))
+                put("inboundTag", JSONArray().put("tun-in"))
+                put("port", 53)
+                put("outboundTag", "dns-out")
+            })
+            put(JSONObject().apply {
+                put("type", "field")
+                put("ip", JSONArray().put("127.0.0.0/8").put("192.168.0.0/16").put("10.0.0.0/8").put("172.16.0.0/12"))
+                put("outboundTag", "direct")
+            })
+            put(JSONObject().apply {
+                put("type", "field")
+                put("network", "tcp,udp")
                 put("outboundTag", "proxy")
             })
         }
@@ -107,27 +109,21 @@ object ConfigBuilder {
                     p["flow"]?.takeIf { it.isNotBlank() }?.let { put("flow", it) }
                 }
                 outbound.put("settings", JSONObject().put("vnext", JSONArray().put(JSONObject().apply {
-                    put("address", profile.address)
-                    put("port", profile.port)
-                    put("users", JSONArray().put(user))
+                    put("address", profile.address); put("port", profile.port); put("users", JSONArray().put(user))
                 })))
             }
             "trojan" -> {
                 outbound.put("protocol", "trojan")
                 outbound.put("settings", JSONObject().put("servers", JSONArray().put(JSONObject().apply {
-                    put("address", profile.address)
-                    put("port", profile.port)
-                    put("password", p["user"] ?: "")
+                    put("address", profile.address); put("port", profile.port); put("password", p["user"] ?: "")
                 })))
             }
             "vmess" -> {
                 outbound.put("protocol", "vmess")
                 outbound.put("settings", JSONObject().put("vnext", JSONArray().put(JSONObject().apply {
-                    put("address", profile.address)
-                    put("port", profile.port)
+                    put("address", profile.address); put("port", profile.port)
                     put("users", JSONArray().put(JSONObject().apply {
-                        put("id", p["id"] ?: "")
-                        put("security", p["scy"] ?: "auto")
+                        put("id", p["id"] ?: ""); put("security", p["scy"] ?: "auto")
                         put("alterId", p["aid"]?.toIntOrNull() ?: 0)
                     }))
                 })))
@@ -135,10 +131,8 @@ object ConfigBuilder {
             else -> {
                 outbound.put("protocol", "shadowsocks")
                 outbound.put("settings", JSONObject().put("servers", JSONArray().put(JSONObject().apply {
-                    put("address", profile.address)
-                    put("port", profile.port)
-                    put("method", p["method"] ?: "aes-256-gcm")
-                    put("password", p["password"] ?: "")
+                    put("address", profile.address); put("port", profile.port)
+                    put("method", p["method"] ?: "aes-256-gcm"); put("password", p["password"] ?: "")
                 })))
             }
         }
@@ -148,16 +142,12 @@ object ConfigBuilder {
         val stream = JSONObject().put("network", network).put("security", security)
         if (security == "reality") {
             stream.put("realitySettings", JSONObject().apply {
-                put("serverName", p["sni"] ?: "")
-                put("fingerprint", p["fp"] ?: "chrome")
-                put("publicKey", p["pbk"] ?: "")
-                put("shortId", p["sid"] ?: "")
-                put("spiderX", p["spx"] ?: "/")
+                put("serverName", p["sni"] ?: ""); put("fingerprint", p["fp"] ?: "chrome")
+                put("publicKey", p["pbk"] ?: ""); put("shortId", p["sid"] ?: ""); put("spiderX", p["spx"] ?: "/")
             })
         } else if (security == "tls") {
             stream.put("tlsSettings", JSONObject().apply {
-                put("serverName", p["sni"] ?: profile.address)
-                put("fingerprint", p["fp"] ?: "chrome")
+                put("serverName", p["sni"] ?: profile.address); put("fingerprint", p["fp"] ?: "chrome")
                 put("allowInsecure", p["allowInsecure"] == "1" || p["insecure"] == "1")
             })
         }
@@ -175,9 +165,9 @@ object ConfigBuilder {
                 p["host"]?.takeIf { it.isNotBlank() }?.let { put("host", it) }
             })
         }
-        if (settings.fragmentEnabled) {
-            stream.put("sockopt", JSONObject().put("dialerProxy", "fragment"))
-        }
+        val sockopt = JSONObject().put("tcpKeepAliveIdle", 30)
+        if (settings.fragmentEnabled) sockopt.put("dialerProxy", "fragment")
+        stream.put("sockopt", sockopt)
         outbound.put("streamSettings", stream)
 
         if (settings.muxEnabled && p["flow"].isNullOrBlank()) {
